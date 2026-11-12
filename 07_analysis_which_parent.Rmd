@@ -1,0 +1,74 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_loss <- 
+  read_rds("data_out/df_fu_analysis.rds") %>% 
+  filter(age_loss <= 20.5)
+  # filter(age_loss <= 20.5, # Get rid of unwanted comparison groups
+         # which_parent != "Both") 
+  
+```
+
+Fit model
+
+```{r}
+fit_death_mother <-
+    survival::coxph(survival::Surv(fu_start, fu_anypsy_anytime_all, event = is_anypsy_anytime_all)
+                    ~age_loss_cat + survival::strata(fam_link),
+                    data = df_loss %>% filter(which_parent == "Mother"))
+
+fit_death_father <-
+    survival::coxph(survival::Surv(fu_start, fu_anypsy_anytime_all, event = is_anypsy_anytime_all)
+                    ~age_loss_cat + survival::strata(fam_link),
+                    data = df_loss %>% filter(which_parent == "Father"))
+```
+
+Extract coeffiecients
+
+```{r}
+df_coeffs_parent <- 
+  parameters::parameters(fit_death_mother, exp = T) %>% 
+  as_tibble() %>% 
+  mutate(parent_lost = "Mother") %>% 
+  bind_rows(parameters::parameters(fit_death_father, exp = T) %>% 
+            as_tibble() %>% 
+            mutate(parent_lost = "Father")) %>% 
+  mutate(age_cat = str_extract(Parameter, "(?<=age_loss_cat)\\d+"),
+         age_cat = as.numeric(age_cat)) %>%
+  filter(age_cat != 0)
+```
+
+Plot
+
+```{r}
+df_coeffs_parent %>% 
+  mutate(parent_lost = fct_relevel(parent_lost, "Mother")) %>% 
+ 
+  ggplot(aes(x = age_cat, 
+             y = Coefficient,
+             color = parent_lost,
+             ymin = CI_low,
+             ymax = CI_high)) +
+  geom_ribbon(alpha = 1/4, fill =NA, linetype = 2) +
+  geom_line(aes(group = parent_lost)) +
+  geom_hline(yintercept = 1, color = "red2", linetype = 2) +
+  geom_vline(xintercept = 18, alpha = .3, linewidth = 20) +
+  annotate("text", x = 18, y = 4, label = "Reference age group",
+           angle = 270, size = 4) +
+  scale_x_continuous(breaks = seq(0, 18, by = 2),
+                     labels = c(seq(0, 16, by = 2), "18-20"),
+                     limits = c(0, 18)) +
+  labs(x = "Age at parental loss", y = "Hazard ratio", color = "Parent lost") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+

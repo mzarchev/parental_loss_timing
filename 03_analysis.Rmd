@@ -1,0 +1,154 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_loss <- 
+  # read_rds("data_out/df_analysis.rds") %>% 
+  read_rds("data_out/df_fu_analysis.rds") %>% 
+  filter(age_loss <= 20.5) # Get rid of unwanted comparison groups
+```
+
+Function for fixed effect model
+
+```{r}
+run_fixed_logist <- function(outc_var){
+  
+  # Construct formula
+  formula <- paste0(outc_var, "~age_loss_cat|fam_link")
+
+  # Fit model
+  fit <-
+   fixest::feglm(as.formula(formula),
+                 family = "binomial",
+                 data = df_loss)
+
+  # Return coefficients
+  parameters::parameters(fit, keep = "age_loss_cat", exp = T) %>% 
+    as_tibble() %>% 
+    mutate(age_cat = str_remove(Parameter, "age_loss_cat") %>% as.numeric())
+}
+
+run_surv <- function(fu_var){
+  
+  # Binary outcome variable (e.g is_dep)
+  outc_var <- paste0("is_", str_remove(fu_var, "fu_"))
+
+  # Construct formula
+  formula <- paste0("survival::Surv(fu_start,", fu_var, ", event = ", outc_var, ") ~ 
+                    age_loss_cat + strata(fam_link)")
+
+  
+  # Fit model
+  fit_surv <-
+    survival::coxph(as.formula(formula),
+                    data = df_loss)
+
+  # Return coefficients
+  parameters::parameters(fit_surv, keep = "age_loss_cat", exp = T) %>% 
+    as_tibble() %>% 
+    mutate(age_cat = str_remove(Parameter, "age_loss_cat") %>% as.numeric())
+}
+```
+
+Run models
+
+```{r}
+outc_cols <- 
+  df_loss %>%
+  select(matches("is_.+anytime_all")) %>%
+  colnames()
+
+df_coeffs <-
+  tibble(outc_var = outc_cols) %>%
+  mutate(coeffs = map(outc_var, run_fixed_logist)) %>% 
+  unnest(coeffs)
+```
+
+Format
+
+```{r}
+df_coeffs_fmt <-
+  df_coeffs %>% 
+  mutate(outc = case_when(str_detect(outc_var, "anypsy") ~ "Any psychiatric disorder",
+                          str_detect(outc_var, "dep") ~ "Depression",
+                          str_detect(outc_var, "anx") ~ "Anxiety",
+                          str_detect(outc_var, "sub") ~ "Substance abuse",
+                          str_detect(outc_var, "bip") ~ "Bipolar disorder",
+                          str_detect(outc_var, "neu") ~ "Neurodevelopmental disorder",
+                          str_detect(outc_var, "per") ~ "Personality disorder",
+                          str_detect(outc_var, "psc") ~ "Psychotic disorder",
+                          str_detect(outc_var, "sle") ~ "Sleep disorder",
+                          str_detect(outc_var, "str") ~ "Stress-related disorder",
+                          )) 
+```
+
+### Plot
+
+Any mental illness
+
+```{r}
+plt_any <-
+  df_coeffs_fmt %>% 
+  filter(outc == "Any psychiatric disorder") %>%
+  ggplot(aes(x = age_cat, 
+             y = Coefficient,
+             ymin = CI_low,
+             ymax = CI_high)) +
+  geom_ribbon(alpha = 1/4, color = "gray", fill =NA, linetype = 2) +
+  geom_line(aes(group = 1)) +
+  geom_hline(yintercept = 1, color = "red2", linetype = 2) +
+  geom_vline(xintercept = 18, alpha = .3, linewidth = 20) +
+  annotate("text", x = 18, y = 9, label = "Reference age group",
+           angle = 270, size = 4) +
+  facet_wrap(~outc, scales = "free") +
+  scale_x_continuous(breaks = seq(0, 18, by = 2),
+                     labels = c(seq(0, 16, by = 2), "18-20"),
+                     limits = c(0, 18)) +
+  labs(x = "Age at parental loss", y = "Odds ratio") +
+  theme_minimal()
+```
+
+Specific diagnoses
+
+```{r}
+plt_diag <-
+  df_coeffs_fmt %>% 
+  filter(outc != "Any psychiatric disorder") %>% 
+  ggplot(aes(x = age_cat, 
+             y = Coefficient,
+             ymin = CI_low,
+             ymax = CI_high)) +
+  geom_ribbon(alpha = 1/4, color = "gray", fill =NA, linetype = 2) +
+  geom_line(aes(group = 1)) +
+  geom_hline(yintercept = 1, color = "red2", linetype = 2) +
+  geom_vline(xintercept = 18, alpha = .3, linewidth = 3) +
+  facet_wrap(~outc, scales = "free") +
+  scale_x_continuous(breaks = seq(0, 20, by = 4),
+                     labels = c(seq(0, 16, by = 4), "18-20"),
+                     limits = c(0, 18)) +
+  labs(x = "Age at parental loss", y = "Odds ratio") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+  
+```
+
+```{r fig.height=8, fig.width=7}
+patchwork::wrap_plots(plt_any, plt_diag, 
+                      ncol = 1, heights = c(1/2, 1)) +
+  patchwork::plot_annotation(tag_levels = 'A')
+```
+
+Export
+
+```{r}
+
+```
+

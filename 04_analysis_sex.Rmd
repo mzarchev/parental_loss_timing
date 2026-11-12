@@ -1,0 +1,71 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_loss <- 
+  read_rds("data_out/df_fu_analysis.rds") %>% 
+  filter(age_loss <= 20.5)
+```
+
+Fit model
+
+```{r}
+fit_boys <-
+    survival::coxph(survival::Surv(fu_start, fu_anypsy_anytime_all, event = is_anypsy_anytime_all)
+                    ~age_loss_cat + survival::strata(fam_link),
+                    data = df_loss %>% filter(sex == "1"))
+
+fit_girls <-
+    survival::coxph(survival::Surv(fu_start, fu_anypsy_anytime_all, event = is_anypsy_anytime_all)
+                    ~age_loss_cat + survival::strata(fam_link),
+                    data = df_loss %>% filter(sex == "2"))
+```
+
+Extract coeffiecients
+
+```{r}
+df_coeffs_sex <- 
+  parameters::parameters(fit_boys, exp = T) %>% 
+  as_tibble() %>% 
+  mutate(sex = "Male") %>% 
+  bind_rows(parameters::parameters(fit_girls, exp = T) %>% 
+            as_tibble() %>% 
+            mutate(sex = "Female")) %>% 
+  mutate(age_cat = str_extract(Parameter, "(?<=age_loss_cat)\\d+"),
+         age_cat = as.numeric(age_cat)) %>%
+  filter(age_cat != 0)
+```
+
+Plot
+
+```{r}
+df_coeffs_sex %>% 
+  # mutate(parent_lost = fct_relevel(parent_lost, "Mother")) %>% 
+ 
+  ggplot(aes(x = age_cat, 
+             y = Coefficient,
+             color = sex,
+             ymin = CI_low,
+             ymax = CI_high)) +
+  geom_ribbon(alpha = 1/4, fill =NA, linetype = 2) +
+  geom_line(aes(group = sex)) +
+  geom_hline(yintercept = 1, color = "red2", linetype = 2) +
+  geom_vline(xintercept = 18, alpha = .3, linewidth = 20) +
+  annotate("text", x = 18, y = 4, label = "Reference age group",
+           angle = 270, size = 4) +
+  scale_x_continuous(breaks = seq(0, 18, by = 2),
+                     labels = c(seq(0, 16, by = 2), "18-20"),
+                     limits = c(0, 18)) +
+  labs(x = "Age at parental loss", y = "Hazard ratio", color = "Child sex") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+

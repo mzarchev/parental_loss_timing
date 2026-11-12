@@ -1,0 +1,121 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_loss <- 
+  read_rds("../data_out/df_fu_analysis.rds") %>% 
+  filter(age_loss <= 20.5) %>%  # Get rid of unwanted comparison groups
+  mutate(age_loss = age_loss - mean(age_loss, na.rm = T))
+  
+round(range((df_loss$age_loss)))
+```
+
+Calculate between effect
+
+```{r}
+df_loss$between_age_loss <- ave(df_loss$age_loss, df_loss$fam_link, FUN=mean)
+```
+
+Fit GLM
+
+```{r}
+fit_glm <- 
+  glm(is_anypsy_anytime_all~between_age_loss + age_loss,
+      family="binomial",
+      data=df_loss)
+
+fit_glm_natural <- 
+  glm(is_anypsy_anytime_all~between_age_loss + age_loss,
+      family="binomial",
+      data=df_loss %>% filter(unnatural_death == 0))
+
+fit_glm_unnatural <- 
+  glm(is_anypsy_anytime_all~between_age_loss + age_loss,
+      family="binomial",
+      data=df_loss %>% filter(unnatural_death == 1))
+```
+
+Standardized average treatment effect
+
+```{r}
+fit_std <- stdReg::stdGlm(fit_glm,
+                          data = df_loss,
+                          X = "age_loss",
+                          x = seq(-14, 29, 1),
+                          cluster = "fam_link")
+
+fit_std_unnatural <- stdReg::stdGlm(fit_glm_unnatural,
+                                    data = df_loss %>% filter(unnatural_death == 1),
+                                    X = "age_loss",
+                                    x = seq(-14, 29, 1),
+                                    cluster = "fam_link")
+
+fit_std_natural <- stdReg::stdGlm(fit_glm_natural,
+                                  data = df_loss %>% filter(unnatural_death == 0),
+                                  X = "age_loss",
+                                  x = seq(-14, 29, 1),
+                                  cluster = "fam_link")
+```
+
+Extract estimates
+
+```{r}
+df_std_summ <-
+  summary(fit_std, 
+          transform = "odds",
+          contrast = "ratio",
+          reference = 18 - mean(df_loss$age_loss, na.rm = T)) %>% 
+  pluck("est.table") %>% 
+  as_tibble() %>%
+  mutate(death = "All deaths") %>% 
+  bind_rows(summary(fit_std_unnatural, 
+                    transform = "odds",
+                    contrast = "ratio",
+                    reference = 18 - mean(df_loss$age_loss, na.rm = T)) %>% 
+            pluck("est.table") %>% 
+            as_tibble() %>%
+            mutate(death = "Sudden")) %>% 
+  bind_rows(summary(fit_std_natural, 
+                    transform = "odds",
+                    contrast = "ratio",
+                    reference = 18 - mean(df_loss$age_loss, na.rm = T)) %>% 
+            pluck("est.table") %>% 
+            as_tibble() %>%
+            mutate(death = "Not sudden")) %>% 
+  mutate(age_cat = rep(seq(-14, 29, 1),3) + mean(df_loss$age_loss, na.rm = T))
+```
+
+Plot
+
+```{r}
+df_std_summ %>% 
+  ggplot(aes(x = age_cat, 
+             y = Estimate,
+             ymin = `lower 0.95` - 0.025,
+             ymax = `upper 0.95` + 0.025,
+             color = death, fill = death)) +
+  geom_ribbon(alpha = 1/4, color =NA, alpha = 0.3, linetype = 2) +
+  geom_line(aes(group = death)) +
+  geom_hline(yintercept = 1, color = "red2", linetype = 2) +
+  # geom_vline(xintercept = 18, alpha = .3, linewidth = 20) +
+  # annotate("text", x = 18, y = 5, label = "Reference age group",
+           # angle = 270, size = 4) +
+  # facet_wrap(~outc, scales = "free") +
+  scale_x_continuous(breaks = seq(0, 18, by = 2),
+                     # labels = c(seq(0, 16, by = 2), "18-20"),
+                     limits = c(0, 18)) +
+  labs(x = "Age at parental loss", y = "Odds ratio",
+       fill = "Cause of parental deaths",
+       color = "Cause of parental deaths") +
+  coord_cartesian(ylim = c(0.9, 4.5)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```

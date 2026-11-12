@@ -1,0 +1,146 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_loss <- 
+  readr::read_rds("data_out/df_descriptives.rds") %>% 
+  filter(age_loss <= 20.5)
+```
+
+Get rid of non-discordant pairs that do not make it into the main analysis
+
+```{r}
+fit_to_exclude <- 
+  fixest::feglm(is_anypsy_anytime_all ~ 1|fam_link,
+                family = "binomial",
+                data = df_loss)
+
+df_loss_excl <-
+  df_loss %>%
+  filter(!fam_link %in% fit_to_exclude$fixef_removed$fam_link)
+```
+
+
+### Age of loss
+
+```{r}
+df_loss_excl %>% 
+  ggplot(aes(x = age_loss)) +
+  geom_histogram() +
+  labs(x = "Age of parental loss", y = "") +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA),
+        panel.grid = element_blank())
+```
+
+### Outcome counts 
+
+```{r}
+df_loss_excl %>% 
+  summarize(across(starts_with("is_"), sum)) %>% 
+  pivot_longer(everything()) %>% 
+  mutate(pct = value/nrow(df_loss),
+         n_pct = paste0(prettyNum(value, big.mark = ","),
+                        "\n(", sprintf("%.1f", pct*100), "%)"),
+         outc = case_when(str_detect(name, "anypsy") ~ "Any psychiatric disorder",
+                          str_detect(name, "dep") ~ "Depression",
+                          str_detect(name, "anx") ~ "Anxiety",
+                          str_detect(name, "sub") ~ "Substance abuse",
+                          str_detect(name, "bip") ~ "Bipolar disorder",
+                          str_detect(name, "neu") ~ "Neurodevelopmental disorder",
+                          str_detect(name, "per") ~ "Personality disorder",
+                          str_detect(name, "psc") ~ "Psychotic disorder",
+                          str_detect(name, "sle") ~ "Sleep disorder",
+                          str_detect(name, "str") ~ "Stress-related disorder")) %>% 
+  drop_na(outc) %>% 
+  
+  ggplot(aes(x = value, y = reorder(outc, value))) +
+  geom_col() +
+  geom_text(aes(label = n_pct), nudge_x = 400, 
+            lineheight = .8) +
+  coord_cartesian(clip = "off", xlim = c(300, 6000)) +
+  labs(x = "Count", y = "") +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA),
+        panel.grid = element_blank())
+```
+
+Table 1
+
+```{r}
+median(df_loss_excl$age_loss)
+df_loss_excl %>% count(fam_link) %>% filter(n>2)
+```
+```{r}
+df_loss_excl %>% 
+  mutate(fu_years = follow_up_years,
+         age_loss_cat = ifelse(age_loss < 17, "Age at parental loss before 18", "Age at parental loss 18-20"),
+         age_loss_cat = fct_relevel(age_loss_cat, "Age at parental loss before 18"),
+         which_parent,
+         unnatural_death = unnatural_death == 1, 
+         sex = sex == 1, 
+         birth_country, 
+         psy_family = psy_family == 1,
+         psy_history = preexist_diag,
+         birth_country = case_when(birth_country == "Sverige" ~ "Sweden",
+                                   birth_country == "Asien" ~ "Asia",
+                                   birth_country %in% c("Europa utom EU27 och Norden",
+                                                        "Norden utom Sverige",
+                                                        "EU27 utom Norden") ~ "Europe",
+                                   birth_country == "Afrika" ~ "Africa",
+                                   birth_country == "Sydamerika" ~ "South America",
+                                   birth_country == "Nordamerika" ~ "North America"),
+         across(starts_with("is_"), as.logical),
+         # is_any_mh = ifelse(is_any_mh == 1, "Developed mental illness", "Did not develop mental illness"),
+         .keep = "none") %>% 
+  relocate(fu_years, sex, birth_country, which_parent, unnatural_death,
+           psy_family, psy_history, is_anypsy_anytime_all) %>% 
+  gtsummary::tbl_summary(by = "age_loss_cat",
+                         sort = gtsummary::all_categorical(FALSE) ~ "frequency",
+                         statistic = list(fu_years ~ "{sum}"),
+                         label = list(sex = "Sex (male)",
+                                      birth_country = "National origin",
+                                      # income = "Household income, euros",
+                                      which_parent = "Parent lost",
+                                      unnatural_death = "Cause of parental death (sudden)",
+                                      psy_family = "Mental illness in family",
+                                      psy_history = "Mental illness in index child before loss",
+                                      fu_years = "Person years, total",
+                                      fu_mean_years = "Person years, average",
+                                      is_anypsy_anytime_all = "Any psychiatric disorder",
+                                      is_dep_anytime_all = "Depression diagnosis",
+                                      is_anx_anytime_all = "Anxiety diagnosis",
+                                      is_sub_anytime_all = "Substance abuse diagnosis",
+                                      is_bip_anytime_all = "Bipolar disorder",
+                                      is_neu_anytime_all = "Neurodevelopmental disorder",
+                                      is_per_anytime_all = "Personality disorder",
+                                      is_psc_anytime_all = "Psychotic disorder",
+                                      is_sle_anytime_all = "Sleep disorder",
+                                      is_str_anytime_all = "Stress-related disorder")) %>% 
+  gtsummary::add_overall() %>% 
+  gtsummary::as_gt() %>% 
+  gt::opt_table_lines(extent = "none") |>
+  gt::tab_options(
+      data_row.padding = gt::px(1),
+      heading.border.bottom.width = 2,
+      heading.border.bottom.style = "solid",
+      table.border.top.color = "white",
+      table_body.border.top.width = 1,
+      heading.title.font.size = 13,
+      table.font.size = 12,
+      table_body.border.bottom.width = 1,
+      table_body.border.bottom.style = "solid",
+      column_labels.border.bottom.style = "solid",
+      column_labels.border.bottom.width = 1)
+
+```
+

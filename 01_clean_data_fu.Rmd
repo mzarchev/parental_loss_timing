@@ -1,0 +1,300 @@
+---
+title: "Clean data"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+Load data
+
+```{r}
+df_raw      <- haven::read_sas("data_in/datasetup_20260201.sas7bdat")
+df_visits_all <- haven::read_sas("../Data/outcomes/outcome_anypsy.sas7bdat")
+```
+
+Exclude
+- People who died before their parents
+- People born before 1971
+- People whose 35th birthday is after March 1st, 2025
+
+```{r}
+lopnr_died_before_parents <-
+  df_raw %>% 
+  mutate(age_death = as.numeric((xdeathdate - xbirthdate)/365)) %>% 
+  filter(age_death < age_loss) %>% 
+  pull(LopNR)
+
+df_excl <-
+  df_raw %>%
+  # Calculate 25th and 35th birthdays
+  mutate(dt_25_birthday = xbirthdate + lubridate::years(25),
+         dt_35_birthday = xbirthdate + lubridate::years(35),
+         dt_emigration = replace_na(dt_emigration, as.Date("2050-01-01")),
+         xdeathdate = replace_na(xdeathdate, as.Date("2050-01-01"))) %>% 
+  filter(xbirthdate > as.Date("1971-01-01"),
+         xbirthdate < as.Date("2000-03-01"),
+         dt_35_birthday < as.Date("2023-01-01"),
+         !c(LopNR %in% lopnr_died_before_parents)) %>% 
+  # Exclude if only one sibling left in pair
+  add_count(fmlink) %>% 
+  filter(n > 1) %>% 
+  select(-n)
+```
+
+Calculate any additional variables and select only relevant ones
+
+```{r}
+regex_icd_cat <- "^(798|E[89][0-9]{2}|R96|[V-Y])"
+
+df_sel <-
+  df_excl %>% 
+  # Did parents die within a year of each other
+  mutate(both_died = abs(as.numeric(xdeathdate_moth - xdeathdate_fath)) < 365,
+         both_died = replace_na(both_died, 0)) %>% 
+  # Which parent died 
+  mutate(which_parent = case_when(both_died == 1 ~ "Both",
+                                  dt_loss == xdeathdate_fath ~ "Father",
+                                  dt_loss == xdeathdate_moth ~ "Mother")) %>% 
+  # Was it an unnatural death
+  mutate(icd_death = ifelse(which_parent == "Mother" | which_parent == "Both",
+                            dia_moth, dia_fath),
+         unnatural_death = as.numeric(str_detect(icd_death, regex_icd_cat))) %>%
+  # How many person years between death and 35th birthday (end of FU)
+  mutate(person_years = lubridate::time_length(lubridate::interval(dt_loss, dt_35_birthday), "year")) %>% 
+  select(lopnr = LopNR,
+         fam_link = fmlink,
+         age_loss, which_parent, unnatural_death, sex,
+         person_years,
+         dt_birth = xbirthdate,
+         dt_25_birthday, dt_35_birthday,
+         dt_loss)
+```
+
+### Calculate date of first visit 
+
+Create a wide dataset with first date of visit for:
+
+* Each diagnostic outcome (for loop)
+* Each planned-unplanned scenario (first two datasets within for loop)
+* Each before or after 25 time window (second datasets)
+
+```{r}
+df_fu_joined <- select(df_sel, lopnr) 
+
+for(file in list.files("../Data/outcomes")){
+  
+  # Location of each data file
+  data_dir <- paste0("../Data/outcomes/", file)
+  # Outcome label
+  outcome <- str_extract(data_dir, "(?<=outcome_).+(?=[.])")
+  
+  df_visits <- 
+    # Load data
+    haven::read_sas(data_dir) %>% 
+    # Keep only needed variables
+    rename(dt_visit = starts_with("dt_")) %>% 
+    mutate(lopnr = LopNR, 
+           dt_visit, 
+           planned = ifelse(planned == "", NA, planned),
+           visit_unplanned = planned == "2",
+           .keep = "none") %>% 
+    # Apply exclusion criteria
+    filter(lopnr %in% df_sel$lopnr) %>%
+    drop_na(dt_visit, planned) %>% 
+    # Join with birthday data
+    left_join(df_sel %>% select(lopnr, dt_loss, dt_25_birthday, dt_35_birthday),
+              by = "lopnr") %>%
+    filter(dt_visit > dt_loss,
+           dt_visit < dt_35_birthday)
+  
+  
+  df_visits_anytime_all <-
+    df_visits %>% 
+    select(lopnr, dt_visit) %>% 
+    slice_min(dt_visit,
+              by = lopnr,
+              with_ties = F) %>% 
+    mutate(timing_planned = "anytime_all")
+  
+  df_visits_anytime_unplanned <-
+    df_visits %>% 
+    filter(visit_unplanned) %>%
+    select(lopnr, dt_visit) %>% 
+    slice_min(dt_visit, 
+              by = lopnr,
+              with_ties = F) %>% 
+    mutate(timing_planned = "anytime_unplanned")
+  
+  df_visits_after_25_all <- 
+    df_visits %>% 
+    filter(dt_visit > dt_25_birthday) %>%
+    select(lopnr, dt_visit) %>% 
+    slice_min(dt_visit, 
+              by = lopnr,
+              with_ties = F) %>% 
+    mutate(timing_planned = "after_25_all")
+    
+  df_visits_after_25_unplanned <- 
+    df_visits %>% 
+    filter(dt_visit > dt_25_birthday,
+           visit_unplanned) %>%
+    select(lopnr, dt_visit) %>% 
+    slice_min(dt_visit, 
+              by = lopnr,
+              with_ties = F) %>% 
+    mutate(timing_planned = "after_25_unplanned")
+  
+  df_visits_combined <-
+    # Combine together
+    bind_rows(df_visits_anytime_all, df_visits_anytime_unplanned,
+              df_visits_after_25_all, df_visits_after_25_unplanned) %>% 
+    # Make wide
+    pivot_wider(names_from = timing_planned, values_from = dt_visit) %>%
+    # Add label for outcome
+    rename_with(~paste0(outcome, "_", .), 
+                .cols = -lopnr)
+    
+  # Join with the rest of the data
+  df_fu_joined <- 
+    left_join(df_fu_joined, df_visits_combined, by = "lopnr")
+}
+```
+
+Add variables needed for calculating follow up time (dt_birth, dt_death, dt_emigration)
+
+```{r}
+df_fu_full <-
+  df_fu_joined %>% 
+  left_join(df_raw %>% select(lopnr = LopNR,
+                              dt_birth = xbirthdate,
+                              dt_emigration,
+                              dt_index_death = xdeathdate),
+            by = "lopnr") %>% 
+  left_join(df_sel %>% select(lopnr, dt_35_birthday),
+            by = "lopnr")
+```
+
+### Calculate follow-up and outcome binary indicator
+
+Function for calculating follow-up of each psychiatric outcome
+
+```{r}
+calculate_fu <- function(dt_var){
+  
+  # Label for follow-up end variable (e.g fu_dep_after_25_planned)
+  fu_var_lab  <- paste0("fu_", dt_var)
+  # Label for follow-up 0/1 outcome variable (e.g is_dep_after_25_planned)
+  bin_var_lab <- paste0("is_", dt_var)
+  
+  df_fu <-
+    df_fu_full %>% 
+    rowwise() %>% 
+    # Calculate which came first - diagnosis, emigration, death or 35th birthday
+    mutate(fu_start = as.numeric(dt_birth),
+           !!fu_var_lab := min(c(!!sym(dt_var), dt_emigration, 
+                                 dt_35_birthday,
+                                 dt_index_death, as.Date("2023-03-01")),
+                                 na.rm = T),
+           !!fu_var_lab := as.numeric(!!sym(fu_var_lab))) %>% 
+    ungroup() %>% 
+    # Calculate diagnosis binary indicator (i.e. FU ends with diagnosis) 
+    mutate(!!bin_var_lab := as.numeric(!!sym(fu_var_lab) == as.numeric(!!sym(dt_var))),
+           !!bin_var_lab := ifelse(is.na(!!sym(bin_var_lab)), 0, !!sym(bin_var_lab))) %>% 
+    select(all_of(c(fu_var_lab, bin_var_lab)))
+}
+```
+
+Apply function
+
+```{r}
+dt_cols <- 
+  df_fu_full %>%
+  select(matches("anytime|25")) %>% # All outcome columns have 25 in the name
+  colnames()
+
+df_fus <-
+  tibble(dt_col = dt_cols) %>% 
+  mutate(fu_data = map(dt_col, calculate_fu))
+```
+
+Combine into one data set
+
+```{r}
+df_fus_wide <- 
+  df_fus %>% 
+  pull("fu_data") %>% 
+  reduce(bind_cols)
+
+# Join with baseline data
+df_all_fus <-
+  df_sel %>%
+  bind_cols(df_fus_wide) %>% 
+  mutate(fu_start = as.numeric(dt_loss),,
+         across(starts_with("fu_"), ~. - fu_start)) # Make sure follow-up starts at birth for everyone
+```
+
+### Create dummy variable for age of parental death
+with ages 18-20 as reference
+
+```{r}
+df_exposure_cat <-
+  df_all_fus %>% 
+  mutate(age_loss_cat = round(age_loss),
+         age_loss_cat = ifelse(age_loss_cat %in% c(18, 19, 20), 18, age_loss_cat),
+         age_loss_cat = as_factor(age_loss_cat),
+         age_loss_cat = fct_relevel(age_loss_cat, "18")) %>% 
+  filter(!c(lopnr %in% lopnr_died_before_parents))
+```
+
+### Calculate variable for pre-existing mental illness
+
+```{r}
+df_first_visit <-
+  df_visits_all %>% 
+  drop_na(dt_psy) %>%  
+  slice_min(dt_psy, 
+            by = LopNR, 
+            with_ties = F)
+
+df_preexist <-
+  df_exposure_cat %>% 
+  left_join(df_first_visit %>%  select(lopnr = LopNR, dt_psy)) %>% 
+  mutate(preexist_diag = dt_psy < dt_loss,
+         preexist_diag = ifelse(is.na(preexist_diag), F, preexist_diag)) %>% 
+  select(-dt_psy)
+```
+
+
+### Extra dataset for descriptives
+
+Contains only the binary indicators and sociodemographics
+
+```{r}
+df_descr <-
+  df_preexist %>% 
+  mutate(follow_up_years = fu_anypsy_anytime_all/365.25) %>% 
+  select(lopnr, which_parent, preexist_diag, follow_up_years, matches("is_.+_anytime_all")) %>% 
+  left_join(df_excl %>%
+            select(lopnr = LopNR,
+                   fam_link = fmlink,
+                   age_loss, sex, birth_country, residency_region,
+                   income, edu, psy_family, psy_history),
+            by = "lopnr") 
+```
+
+### Export
+
+```{r}
+df_loss <- 
+  read_rds("data_out/df_fu_analysis.rds") %>% 
+  left_join(df_sel %>% select(lopnr, unnatural_death),
+            by = "lopnr")
+```
+
+
+```{r}
+write_rds(df_preexist, "data_out/df_fu_analysis.rds")
+write_rds(df_descr, "data_out/df_descriptives.rds")
+```
